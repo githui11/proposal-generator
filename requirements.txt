@@ -8,3 +8,5 @@ google-api-python-client
 openai
 requests
 pydantic
+psycopg2-binary
+python-multipart

@@ -1,304 +1,435 @@
-// Repliix Proposal Engine — Vercel frontend
-// State stored in localStorage (no server-side DB needed)
+// Proposal Generator — multi-user SaaS frontend
 
-const STORAGE_KEY = 'repliix_proposals_v2';
+const SUPABASE_URL      = 'https://ztlsfnihvtsgulzjknqp.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp0bHNmbmlodnRzZ3VsemprbnFwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1MTY2ODMsImV4cCI6MjA5NzA5MjY4M30.rJT2tmYMeE6kkRUm_OmZzp047FP7csqVRUTW7VMUM04';
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let session = null;
+let currentOnboardingStatus = null;
+let selectedMeetingId = null;
+let refreshTimer = null;
 
 // ---------------------------------------------------------------------------
-// State (localStorage)
+// Boot
 // ---------------------------------------------------------------------------
-function loadProposals() {
+async function boot() {
+  // Handle Google OAuth callback
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('google') === 'connected' || params.get('google_error')) {
+    window.history.replaceState({}, '', '/');
+  }
+
+  const { data } = await sb.auth.getSession();
+  session = data.session;
+
+  if (session) {
+    await routeUser();
+  } else {
+    showView('auth-view');
+  }
+
+  sb.auth.onAuthStateChange(async (event, s) => {
+    session = s;
+    if (s) {
+      await routeUser();
+    } else {
+      clearInterval(refreshTimer);
+      showView('auth-view');
+    }
+  });
+}
+
+async function routeUser() {
+  const status = await api('GET', '/api/onboarding/status');
+  currentOnboardingStatus = status;
+
+  if (status.onboarded) {
+    startDashboard();
+  } else {
+    startOnboarding(status);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// View helper
+// ---------------------------------------------------------------------------
+function showView(id) {
+  ['auth-view', 'onboarding-view', 'dashboard-view'].forEach(v => {
+    document.getElementById(v).classList.toggle('hidden', v !== id);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+let authMode = 'signin';
+
+function switchTab(mode) {
+  authMode = mode;
+  document.getElementById('tabSignIn').classList.toggle('active', mode === 'signin');
+  document.getElementById('tabSignUp').classList.toggle('active', mode === 'signup');
+  document.getElementById('authSubmitBtn').textContent = mode === 'signin' ? 'Sign In' : 'Create Account';
+  hideEl('auth-error');
+}
+
+async function submitAuth() {
+  const email    = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  if (!email || !password) return;
+
+  const btn = document.getElementById('authSubmitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  hideEl('auth-error');
+
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  } catch { return []; }
+    let result;
+    if (authMode === 'signup') {
+      result = await sb.auth.signUp({ email, password });
+    } else {
+      result = await sb.auth.signInWithPassword({ email, password });
+    }
+
+    if (result.error) throw result.error;
+
+    if (authMode === 'signup' && !result.data.session) {
+      showEl('auth-error');
+      document.getElementById('auth-error').textContent = 'Check your email to confirm your account, then sign in.';
+    }
+  } catch (err) {
+    showEl('auth-error');
+    document.getElementById('auth-error').textContent = err.message || 'Authentication failed';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = authMode === 'signin' ? 'Sign In' : 'Create Account';
+  }
 }
 
-function saveProposals(proposals) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(proposals));
-}
-
-function upsertProposal(proposal) {
-  const proposals = loadProposals();
-  const idx = proposals.findIndex(p => p.id === proposal.id);
-  if (idx >= 0) proposals[idx] = { ...proposals[idx], ...proposal };
-  else proposals.unshift(proposal);
-  saveProposals(proposals);
-  return loadProposals();
-}
-
-// ---------------------------------------------------------------------------
-// Relative time
-// ---------------------------------------------------------------------------
-function relativeTime(isoStr) {
-  if (!isoStr) return '—';
-  const diff = (Date.now() - new Date(isoStr + 'Z').getTime()) / 1000;
-  if (diff < 5)    return 'just now';
-  if (diff < 60)   return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return new Date(isoStr + 'Z').toLocaleDateString();
+async function signOut() {
+  clearInterval(refreshTimer);
+  await sb.auth.signOut();
 }
 
 // ---------------------------------------------------------------------------
-// Render table
+// Onboarding
 // ---------------------------------------------------------------------------
-function renderTable(proposals) {
+let currentStep = 1;
+
+function startOnboarding(status) {
+  showView('onboarding-view');
+
+  if (status.has_fireflies && !status.has_google) {
+    goStep(2);
+  } else if (status.has_fireflies && status.has_google) {
+    // Both connected but not "onboarded" — shouldn't happen, go to step 3
+    goStep(3);
+  } else {
+    goStep(1);
+  }
+
+  // Pre-fill Google connected state if just came back from OAuth
+  if (status.has_google) {
+    showEl('google-connected-tag');
+    document.getElementById('google-connected-email').textContent = status.google_email || '';
+    document.getElementById('connectGoogleBtn').textContent = 'Reconnect Google Account';
+  }
+
+  if (status.webhook_url) {
+    document.getElementById('webhookUrlDisplay').textContent = status.webhook_url;
+  }
+}
+
+function goStep(n) {
+  currentStep = n;
+  [1, 2, 3].forEach(i => {
+    document.getElementById(`step${i}`).classList.toggle('hidden', i !== n);
+
+    const dot  = document.getElementById(`dot${i}`);
+    dot.classList.remove('done', 'active', 'todo');
+    dot.classList.add(i < n ? 'done' : i === n ? 'active' : 'todo');
+  });
+  if (n > 1) document.getElementById('line1').classList.toggle('done', n > 1);
+  if (n > 2) document.getElementById('line2').classList.toggle('done', n > 2);
+}
+
+async function saveFirefliesKey() {
+  const key = document.getElementById('firefliesKey').value.trim();
+  if (!key) return;
+
+  const btn = document.getElementById('step1Btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Validating…';
+  hideEl('step1-error');
+
+  try {
+    await api('POST', '/api/onboarding/fireflies', { api_key: key });
+    currentOnboardingStatus = await api('GET', '/api/onboarding/status');
+
+    if (currentOnboardingStatus.has_google) {
+      goStep(3);
+      document.getElementById('webhookUrlDisplay').textContent = currentOnboardingStatus.webhook_url || '';
+    } else {
+      goStep(2);
+    }
+  } catch (err) {
+    showEl('step1-error');
+    document.getElementById('step1-error').textContent = err.message || 'Invalid API key';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save & Continue';
+  }
+}
+
+async function connectGoogle() {
+  const btn = document.getElementById('connectGoogleBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner spinner-dark"></span> Redirecting…';
+  hideEl('step2-error');
+
+  try {
+    const { auth_url } = await api('GET', '/api/auth/google');
+    window.location.href = auth_url;
+  } catch (err) {
+    showEl('step2-error');
+    document.getElementById('step2-error').textContent = err.message || 'Failed to start Google OAuth';
+    btn.disabled = false;
+    btn.textContent = 'Connect Google Account';
+  }
+}
+
+async function finishOnboarding() {
+  startDashboard();
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+function startDashboard() {
+  showView('dashboard-view');
+  document.getElementById('dashEmail').textContent = session?.user?.email || '';
+  loadProposals();
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(loadProposals, 15000);
+}
+
+async function loadProposals() {
+  try {
+    const { proposals } = await api('GET', '/api/proposals');
+    renderProposals(proposals);
+    renderStats(proposals);
+  } catch (err) {
+    console.error('Failed to load proposals:', err);
+  }
+}
+
+function renderStats(proposals) {
+  const total      = proposals.length;
+  const ready      = proposals.filter(p => p.status === 'ready' || p.status === 'ready_no_doc').length;
+  const sent       = proposals.filter(p => p.status === 'sent').length;
+  const processing = proposals.filter(p => p.status === 'processing').length;
+
+  document.getElementById('statTotal').textContent      = total;
+  document.getElementById('statReady').textContent      = ready;
+  document.getElementById('statSent').textContent       = sent;
+  document.getElementById('statProcessing').textContent = processing;
+}
+
+function renderProposals(proposals) {
   const tbody = document.getElementById('tbody');
-
   if (!proposals.length) {
-    tbody.innerHTML = `
-      <tr><td colspan="6">
-        <div class="empty">
-          <h3>No proposals yet</h3>
-          <p>Click "Load Latest Transcripts" to fetch your Fireflies calls and generate proposals.</p>
-        </div>
-      </td></tr>`;
-    updateStats(proposals);
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <h3>No proposals yet</h3>
+      <p>Proposals appear here automatically after each Fireflies call, or click "Process Meeting" to run one manually.</p>
+    </div></td></tr>`;
     return;
   }
 
-  updateStats(proposals);
-
   tbody.innerHTML = proposals.map(p => {
-    const shortTitle = (p.title || 'Discovery Call').substring(0, 45);
-    const leadName = p.lead_name || '—';
-    const leadEmail = p.lead_email ? `<div class="lead-email">${p.lead_email}</div>` : '';
+    const date = p.created_at ? new Date(p.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '—';
+    const badge = badgeHtml(p.status);
+    const actions = actionsHtml(p);
 
-    const receivedTs = p.received_at
-      ? `<span class="ts">${relativeTime(p.received_at)}</span>`
-      : '<span class="ts">—</span>';
-
-    let readyCol;
-    if (p.status === 'processing') {
-      readyCol = `<span class="badge badge-processing"><span class="spinner"></span>Processing</span>`;
-    } else if (p.status === 'pending') {
-      readyCol = `<span class="badge badge-pending">Queued</span>`;
-    } else if (p.status === 'skipped') {
-      readyCol = `<span class="ts">Skipped (short call)</span>`;
-    } else if (p.status === 'failed') {
-      readyCol = `<span style="color:#f87171;font-size:12px" title="${p.error || ''}" >Failed</span>`;
-    } else if (p.processed_at) {
-      readyCol = `<span class="ts ts-ready">${relativeTime(p.processed_at)}</span>`;
-    } else {
-      readyCol = '<span class="ts">—</span>';
-    }
-
-    const sentCol = p.sent_at
-      ? `<span class="ts ts-sent">${relativeTime(p.sent_at)}</span>`
-      : '<span class="ts">—</span>';
-
-    const viewBtn = p.doc_url
-      ? `<a href="${p.doc_url}" target="_blank" class="btn btn-secondary">View Doc</a>`
-      : '';
-
-    let sendBtn = '';
-    if (p.status === 'sent') {
-      sendBtn = `<span class="btn-sent">✓ Sent</span>`;
-    } else if ((p.status === 'ready') && p.lead_email) {
-      sendBtn = `<button class="btn btn-send" onclick="sendProposal('${p.id}', this)">Send to Lead</button>`;
-    } else if ((p.status === 'ready') && !p.lead_email) {
-      sendBtn = `<span style="font-size:11px;color:#555">No email found</span>`;
-    }
-
-    const retryBtn = (p.status === 'failed' || p.status === 'skipped')
-      ? `<button class="btn btn-secondary" onclick="retryProposal('${p.id}', this)" style="font-size:11px;padding:6px 12px">Retry</button>`
-      : '';
-
-    return `
-      <tr data-id="${p.id}">
-        <td class="td-meeting">
-          <div class="meeting-title" title="${p.title || ''}">${shortTitle}</div>
-        </td>
-        <td>
-          <div class="lead-name">${leadName}</div>
-          ${leadEmail}
-        </td>
-        <td>${receivedTs}</td>
-        <td>${readyCol}</td>
-        <td>${sentCol}</td>
-        <td><div class="actions">${viewBtn}${sendBtn}${retryBtn}</div></td>
-      </tr>`;
+    return `<tr>
+      <td><div class="meeting-title" title="${esc(p.meeting_title || p.meeting_id)}">${esc(p.meeting_title || p.meeting_id)}</div></td>
+      <td>
+        ${p.lead_name ? `<div class="lead-name">${esc(p.lead_name)}</div>` : '<div class="lead-name" style="color:#94a3b8">—</div>'}
+        ${p.lead_email ? `<div class="lead-email">${esc(p.lead_email)}</div>` : ''}
+      </td>
+      <td>${badge}</td>
+      <td class="td-date">${date}</td>
+      <td><div class="actions">${actions}</div></td>
+    </tr>`;
   }).join('');
 }
 
-function updateStats(proposals) {
-  const statsBar = document.getElementById('statsBar');
-  if (!proposals.length) { statsBar.style.display = 'none'; return; }
-  statsBar.style.display = 'flex';
-  document.getElementById('statTotal').textContent = proposals.length;
-  document.getElementById('statReady').textContent = proposals.filter(p => p.status === 'ready' || p.status === 'sent').length;
-  document.getElementById('statSent').textContent = proposals.filter(p => p.status === 'sent').length;
-  document.getElementById('statProcessing').textContent = proposals.filter(p => p.status === 'processing').length;
+function badgeHtml(status) {
+  const labels = {
+    processing: '⏳ Processing',
+    ready: '✓ Ready',
+    ready_no_doc: '⚠ Ready (no doc)',
+    sent: '✉ Sent',
+    failed: '✗ Failed',
+    skipped: '— Skipped',
+  };
+  return `<span class="badge badge-${status}">${labels[status] || status}</span>`;
+}
+
+function actionsHtml(p) {
+  const parts = [];
+  if (p.doc_url) {
+    parts.push(`<a href="${p.doc_url}" target="_blank" class="btn btn-outline btn-sm">Open Doc</a>`);
+  }
+  if ((p.status === 'ready' || p.status === 'ready_no_doc') && p.lead_email && p.doc_url) {
+    parts.push(`<button class="btn btn-primary btn-sm" onclick="sendEmail('${p.id}', this)">Send Email</button>`);
+  }
+  if (p.status === 'sent') {
+    parts.push(`<span style="font-size:12px;color:#065f46;">✓ Sent</span>`);
+  }
+  if (p.status === 'failed') {
+    parts.push(`<button class="btn btn-ghost btn-sm" onclick="retryProposal('${p.meeting_id}', this)" title="${esc(p.error_message || '')}">Retry</button>`);
+  }
+  return parts.join('') || '<span style="color:#94a3b8;font-size:12px;">—</span>';
+}
+
+async function sendEmail(proposalId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    await api('POST', '/api/send', { proposal_id: proposalId });
+    toast('Email sent!', 'success');
+    loadProposals();
+  } catch (err) {
+    toast(err.message || 'Failed to send', 'error');
+    btn.disabled = false;
+    btn.textContent = 'Send Email';
+  }
+}
+
+async function retryProposal(meetingId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Retrying…';
+  try {
+    await api('POST', '/api/process', { meeting_id: meetingId });
+    toast('Processing started', 'success');
+    loadProposals();
+  } catch (err) {
+    toast(err.message || 'Failed', 'error');
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Fetch transcripts + process queue
+// Process modal
 // ---------------------------------------------------------------------------
-let isProcessing = false;
+async function openProcessModal() {
+  selectedMeetingId = null;
+  document.getElementById('processBtn').disabled = true;
+  showEl('processModal');
 
-async function fetchTranscripts() {
-  const btn = document.getElementById('fetchBtn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Fetching...';
+  document.getElementById('transcriptList').innerHTML =
+    '<div style="text-align:center;padding:40px"><div class="spinner spinner-dark"></div></div>';
 
   try {
-    const res = await fetch('/api/transcripts');
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Fetch failed');
-
-    const existing = loadProposals();
-    const existingIds = new Set(existing.map(p => p.id));
-
-    const now = new Date();
-    let added = 0;
-    const newOnes = [];
-
-    (data.transcripts || []).forEach((t, i) => {
-      if (existingIds.has(t.id)) return;
-      // Stagger received_at: each 45s before now so they look like a live feed
-      const receivedAt = new Date(now.getTime() - i * 45000).toISOString().replace('Z', '');
-      newOnes.push({
-        id: t.id,
-        title: t.title || 'Discovery Call',
-        original_date: t.date || '',
-        received_at: receivedAt,
-        processed_at: null,
-        sent_at: null,
-        lead_name: null,
-        lead_email: null,
-        doc_url: null,
-        status: 'pending',
-      });
-      added++;
-    });
-
-    if (added === 0) {
-      showToast('No new transcripts — all are already loaded.', 'success');
-      renderTable(loadProposals());
-      return;
-    }
-
-    // Save all new ones first (so table shows up immediately)
-    let proposals = loadProposals();
-    proposals = [...newOnes, ...proposals];
-    saveProposals(proposals);
-    renderTable(proposals);
-    showToast(`${added} new transcript${added > 1 ? 's' : ''} loaded. Generating proposals...`, 'success');
-
-    // Start processing queue
-    processQueue();
-
-  } catch (e) {
-    showToast(e.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = 'Load Latest Transcripts';
+    const { transcripts } = await api('GET', '/api/transcripts');
+    renderTranscripts(transcripts);
+  } catch (err) {
+    document.getElementById('transcriptList').innerHTML =
+      `<p style="color:#dc2626;font-size:13px;">${err.message}</p>`;
   }
 }
 
-async function processQueue() {
-  if (isProcessing) return;
-  isProcessing = true;
-
-  while (true) {
-    const proposals = loadProposals();
-    const next = proposals.find(p => p.status === 'pending');
-    if (!next) break;
-
-    upsertProposal({ id: next.id, status: 'processing' });
-    renderTable(loadProposals());
-
-    try {
-      const res = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ meeting_id: next.id }),
-      });
-      const data = await res.json();
-
-      if (!res.ok) throw new Error(data.detail || 'Processing failed');
-
-      if (data.status === 'skipped') {
-        upsertProposal({ id: next.id, status: 'skipped' });
-      } else {
-        upsertProposal({
-          id: next.id,
-          status: 'ready',
-          processed_at: new Date().toISOString().replace('Z', ''),
-          doc_url: data.doc_url,
-          lead_name: data.lead_name,
-          lead_email: data.lead_email,
-        });
-      }
-    } catch (e) {
-      upsertProposal({ id: next.id, status: 'failed', error: e.message });
-    }
-
-    renderTable(loadProposals());
+function renderTranscripts(transcripts) {
+  if (!transcripts.length) {
+    document.getElementById('transcriptList').innerHTML = '<p style="color:#94a3b8;font-size:13px;">No recent transcripts found.</p>';
+    return;
   }
-
-  isProcessing = false;
+  document.getElementById('transcriptList').innerHTML = transcripts.map(t => {
+    const date = t.date ? new Date(parseInt(t.date)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+    const dur  = t.duration ? `${Math.round(t.duration)} min` : '';
+    return `<div class="transcript-item" id="ti-${t.id}" onclick="selectTranscript('${t.id}')">
+      <div class="transcript-name">${esc(t.title || t.id)}</div>
+      <div class="transcript-meta">${[date, dur].filter(Boolean).join(' · ')}</div>
+    </div>`;
+  }).join('');
 }
 
-// ---------------------------------------------------------------------------
-// Send proposal
-// ---------------------------------------------------------------------------
-async function sendProposal(meetingId, btn) {
+function selectTranscript(id) {
+  if (selectedMeetingId) {
+    document.getElementById(`ti-${selectedMeetingId}`)?.classList.remove('selected');
+  }
+  selectedMeetingId = id;
+  document.getElementById(`ti-${id}`)?.classList.add('selected');
+  document.getElementById('processBtn').disabled = false;
+}
+
+async function processSelected() {
+  if (!selectedMeetingId) return;
+  const btn = document.getElementById('processBtn');
   btn.disabled = true;
-  btn.textContent = 'Sending...';
-
-  const proposals = loadProposals();
-  const p = proposals.find(x => x.id === meetingId);
-  if (!p) { showToast('Proposal not found', 'error'); return; }
+  btn.innerHTML = '<span class="spinner"></span> Starting…';
 
   try {
-    const res = await fetch('/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        lead_name: p.lead_name || '',
-        lead_email: p.lead_email || '',
-        doc_url: p.doc_url || '',
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Send failed');
-
-    upsertProposal({ id: meetingId, status: 'sent', sent_at: data.sent_at || new Date().toISOString().replace('Z', '') });
-    showToast(`Proposal sent to ${p.lead_email}`, 'success');
-    renderTable(loadProposals());
-  } catch (e) {
-    showToast(e.message, 'error');
+    await api('POST', '/api/process', { meeting_id: selectedMeetingId });
+    closeModal();
+    toast('Proposal generation started', 'success');
+    loadProposals();
+  } catch (err) {
+    toast(err.message || 'Failed', 'error');
     btn.disabled = false;
-    btn.textContent = 'Send to Lead';
+    btn.textContent = 'Generate Proposal';
   }
 }
 
-// ---------------------------------------------------------------------------
-// Retry
-// ---------------------------------------------------------------------------
-async function retryProposal(meetingId) {
-  upsertProposal({ id: meetingId, status: 'pending', error: null });
-  renderTable(loadProposals());
-  processQueue();
+function closeModal() {
+  hideEl('processModal');
+  selectedMeetingId = null;
 }
 
 // ---------------------------------------------------------------------------
-// Toast
+// API helper
 // ---------------------------------------------------------------------------
-let toastTimer = null;
-function showToast(msg, type = '') {
+async function api(method, path, body = null) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (session?.access_token) headers['Authorization'] = `Bearer ${session.access_token}`;
+
+  const resp = await fetch(path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+function showEl(id) { document.getElementById(id)?.classList.remove('hidden'); }
+function hideEl(id) { document.getElementById(id)?.classList.add('hidden'); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function copyWebhook() {
+  const url = document.getElementById('webhookUrlDisplay').textContent;
+  navigator.clipboard.writeText(url).then(() => toast('Webhook URL copied!', 'success'));
+}
+
+let toastTimer;
+function toast(msg, type = '') {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = `show ${type}`;
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = ''; }, 3500);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, 3000);
 }
 
 // ---------------------------------------------------------------------------
-// Init
+// Start
 // ---------------------------------------------------------------------------
-document.addEventListener('DOMContentLoaded', () => {
-  renderTable(loadProposals());
-  // Refresh timestamps every 30s
-  setInterval(() => renderTable(loadProposals()), 30000);
-});
+document.addEventListener('DOMContentLoaded', boot);
