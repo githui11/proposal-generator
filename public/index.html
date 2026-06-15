@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Repliix — Proposal Engine</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 32px;
+      border-bottom: 1px solid #222;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #7c5cfc;
+    }
+
+    .logo h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: #fff;
+    }
+
+    .logo span {
+      font-size: 13px;
+      color: #666;
+      font-weight: 400;
+    }
+
+    /* ── Main ── */
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 40px 32px;
+    }
+
+    .top-bar {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      margin-bottom: 28px;
+    }
+
+    .top-bar h2 {
+      font-size: 22px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .top-bar p {
+      font-size: 13px;
+      color: #666;
+      margin-top: 4px;
+    }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 18px;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s, background 0.15s;
+    }
+
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-primary {
+      background: #7c5cfc;
+      color: #fff;
+    }
+    .btn-primary:not(:disabled):hover { background: #6b4de8; }
+
+    .btn-secondary {
+      background: #1e1e1e;
+      color: #ccc;
+      border: 1px solid #333;
+    }
+    .btn-secondary:not(:disabled):hover { background: #2a2a2a; }
+
+    .btn-send {
+      background: #1a3a2a;
+      color: #4ade80;
+      border: 1px solid #1e5535;
+    }
+    .btn-send:not(:disabled):hover { background: #1f4a35; }
+
+    .btn-sent {
+      background: transparent;
+      color: #4ade80;
+      border: none;
+      cursor: default;
+      font-size: 13px;
+    }
+
+    /* ── Spinner ── */
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid #555;
+      border-top-color: #7c5cfc;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Table ── */
+    .table-wrap {
+      border: 1px solid #222;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead th {
+      background: #141414;
+      padding: 11px 16px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #555;
+      border-bottom: 1px solid #222;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #1a1a1a;
+      transition: background 0.1s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #141414; }
+
+    td {
+      padding: 14px 16px;
+      font-size: 13px;
+      vertical-align: middle;
+    }
+
+    .td-meeting {
+      max-width: 220px;
+    }
+
+    .meeting-title {
+      color: #e0e0e0;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .lead-name {
+      color: #e0e0e0;
+      font-weight: 500;
+    }
+
+    .lead-email {
+      font-size: 11px;
+      color: #555;
+      margin-top: 2px;
+    }
+
+    .ts { color: #777; font-size: 12px; }
+    .ts-ready { color: #a3e635; }
+    .ts-sent { color: #4ade80; }
+
+    /* ── Status badges ── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-processing { background: #1c1c2e; color: #818cf8; border: 1px solid #2e2e5a; }
+    .badge-pending    { background: #1c1c1c; color: #666; border: 1px solid #2a2a2a; }
+    .badge-ready      { background: #142814; color: #4ade80; border: 1px solid #1e4a1e; }
+    .badge-sent       { background: #0e2a1e; color: #34d399; border: 1px solid #155535; }
+    .badge-skipped    { background: #1c1c1c; color: #555; border: 1px solid #2a2a2a; }
+    .badge-failed     { background: #2a1414; color: #f87171; border: 1px solid #4a1e1e; }
+
+    .actions { display: flex; gap: 8px; align-items: center; }
+
+    /* ── Empty state ── */
+    .empty {
+      text-align: center;
+      padding: 80px 20px;
+      color: #444;
+    }
+    .empty h3 { font-size: 16px; color: #666; margin-bottom: 8px; }
+    .empty p { font-size: 13px; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed;
+      bottom: 28px;
+      right: 28px;
+      background: #1e1e1e;
+      border: 1px solid #333;
+      color: #e0e0e0;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 999;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+    #toast.success { border-color: #1e5535; color: #4ade80; }
+    #toast.error { border-color: #4a1e1e; color: #f87171; }
+
+    /* ── Stats bar ── */
+    .stats {
+      display: flex;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .stat {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .stat-value { font-size: 22px; font-weight: 700; color: #fff; }
+    .stat-label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 0.08em; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    <h1>Repliix <span>/ Proposal Engine</span></h1>
+  </div>
+  <button class="btn btn-primary" id="fetchBtn" onclick="fetchTranscripts()">
+    Load Latest Transcripts
+  </button>
+</header>
+
+<main>
+  <div class="top-bar">
+    <div>
+      <h2>Proposals</h2>
+      <p>Auto-generated from Fireflies discovery calls</p>
+    </div>
+  </div>
+
+  <div class="stats" id="statsBar" style="display:none">
+    <div class="stat"><span class="stat-value" id="statTotal">0</span><span class="stat-label">Total</span></div>
+    <div class="stat"><span class="stat-value" id="statReady" style="color:#4ade80">0</span><span class="stat-label">Ready</span></div>
+    <div class="stat"><span class="stat-value" id="statSent" style="color:#34d399">0</span><span class="stat-label">Sent</span></div>
+    <div class="stat"><span class="stat-value" id="statProcessing" style="color:#818cf8">0</span><span class="stat-label">Processing</span></div>
+  </div>
+
+  <div class="table-wrap">
+    <table id="proposalsTable">
+      <thead>
+        <tr>
+          <th>Meeting</th>
+          <th>Lead</th>
+          <th>Received</th>
+          <th>Proposal Ready</th>
+          <th>Email Sent</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr>
+          <td colspan="6">
+            <div class="empty">
+              <h3>No proposals yet</h3>
+              <p>Click "Load Latest Transcripts" to fetch your Fireflies calls and generate proposals.</p>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
